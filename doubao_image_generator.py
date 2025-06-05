@@ -3,6 +3,8 @@ import time
 import json
 import requests
 import re
+import os
+from PIL import Image
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -56,11 +58,15 @@ class DoubaoImageGenerator:
         try:
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("ChromeDriver initialized via WebDriverManager.")
         except Exception as e:
-            print(f"ChromeDriver设置失败: {e}")
+            logger.error(f"ChromeDriver设置失败 (WebDriverManager): {e}", exc_info=True)
             try:
+                logger.info("Attempting to initialize ChromeDriver with default options...")
                 self.driver = webdriver.Chrome(options=chrome_options)
+                logger.info("ChromeDriver initialized with default options (fallback).")
             except Exception as e2:
+                logger.error(f"无法初始化ChromeDriver (fallback attempt): {e2}", exc_info=True)
                 raise Exception(f"无法初始化ChromeDriver: {e2}")
         
         self.driver.implicitly_wait(10)
@@ -69,590 +75,598 @@ class DoubaoImageGenerator:
     def login_and_extract_params(self):
         """登录豆包并提取必要的参数"""
         try:
-            print("正在访问豆包网站...")
+            logger.info("正在访问豆包网站 https://www.doubao.com/chat/ ...")
             self.driver.get('https://www.doubao.com/chat/')
             
-            # 等待页面加载
+            logger.info("等待页面加载 (5s)...")
             time.sleep(5)
             
-            # 检查是否需要登录
             try:
+                login_button_xpath = "//button[contains(text(), '登录') or contains(text(), '登陆')]|//a[contains(text(), '登录') or contains(text(), '登陆')]"
                 login_button = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '登录') or contains(text(), '登陆')]|//a[contains(text(), '登录') or contains(text(), '登陆')]"))
+                    EC.element_to_be_clickable((By.XPATH, login_button_xpath))
                 )
-                print("检测到需要登录，请手动完成登录过程...")
-                print("登录完成后，程序将自动继续...")
+                logger.info("检测到需要登录，请在浏览器中手动完成登录过程。程序将等待最多5分钟。")
                 
-                # 等待用户手动登录
-                WebDriverWait(self.driver, 300).until(
-                    lambda driver: "chat" in driver.current_url and len(driver.get_cookies()) > 0
+                WebDriverWait(self.driver, 300).until( # Wait up to 5 minutes for login
+                    lambda driver: "chat" in driver.current_url and len(driver.get_cookies()) > 5
                 )
-                print("登录成功！")
+                logger.info("登录成功或已继续！")
                 
-            except:
-                print("可能已经登录或无需登录")
+            except Exception: # TimeoutException or other
+                logger.info("可能已经登录或无需登录，未找到明确的登录按钮或等待超时。")
             
-            # 等待页面完全加载
+            logger.info("等待页面参数加载 (3s)...")
             time.sleep(3)
             
-            # 提取参数
             self.extract_dynamic_params()
-            
             return True
             
         except Exception as e:
-            print(f"登录过程中出现错误: {e}")
+            logger.error(f"登录过程中出现错误: {e}", exc_info=True)
             return False
     
     def extract_dynamic_params(self):
         """从当前页面提取动态参数"""
         try:
-            # 获取当前URL中的参数
+            logger.info("开始提取动态参数...")
             current_url = self.driver.current_url
             parsed_url = urlparse(current_url)
             query_params = parse_qs(parsed_url.query)
             
-            # 从URL中提取参数
-            if 'device_id' in query_params:
-                self.device_id = query_params['device_id'][0]
-            if 'web_id' in query_params:
-                self.web_id = query_params['web_id'][0]
+            self.device_id = query_params.get('device_id', [self.device_id])[0]
+            self.web_id = query_params.get('web_id', [self.web_id])[0]
             
-            # 从cookies中提取msToken
             cookies = self.driver.get_cookies()
-            for cookie in cookies:
-                if cookie['name'] == 'msToken':
-                    self.msToken = cookie['value']
-                    break
-            
-            # 如果URL中没有参数，尝试从页面脚本中提取
+            self.msToken = next((cookie['value'] for cookie in cookies if cookie['name'] == 'msToken'), self.msToken)
+
             if not self.device_id or not self.web_id:
+                logger.info("Device ID或Web ID未在URL中找到，尝试从页面源中提取...")
                 page_source = self.driver.page_source
                 
-                # 查找device_id
                 device_id_match = re.search(r'device_id["\']?\s*[:=]\s*["\']?(\d+)', page_source)
-                if device_id_match:
-                    self.device_id = device_id_match.group(1)
+                if device_id_match: self.device_id = device_id_match.group(1)
                 
-                # 查找web_id
                 web_id_match = re.search(r'web_id["\']?\s*[:=]\s*["\']?(\d+)', page_source)
-                if web_id_match:
-                    self.web_id = web_id_match.group(1)
+                if web_id_match: self.web_id = web_id_match.group(1)
             
-            # 如果仍然没有找到，使用默认值
+            # Fallback to defaults if still not found
             if not self.device_id:
                 self.device_id = "7511556792158717459"
+                logger.info(f"Device ID未找到, 使用默认值: {self.device_id}")
             if not self.web_id:
                 self.web_id = "7511556796785526322"
+                logger.info(f"Web ID未找到, 使用默认值: {self.web_id}")
             
-            print(f"提取的参数:")
-            print(f"device_id: {self.device_id}")
-            print(f"web_id: {self.web_id}")
-            print(f"msToken: {self.msToken[:20] + '...' if self.msToken else 'None'}")
-            
+            logger.info(f"提取的参数: device_id={self.device_id}, web_id={self.web_id}, msToken={'存在' if self.msToken else '未找到'}")
+            if self.msToken:
+                 logger.debug(f"msToken: {self.msToken[:20]}...")
+
         except Exception as e:
-            print(f"提取参数时出现错误: {e}")
+            logger.error(f"提取参数时出现错误: {e}", exc_info=True)
     
     def generate_a_bogus(self, url_params):
         """生成a_bogus参数（这是一个简化版本，实际可能需要更复杂的算法）"""
         try:
-            # 执行JavaScript来生成a_bogus
-            # 这里需要根据豆包的实际算法来实现
-            # 暂时返回一个示例值
+            logger.debug("尝试生成a_bogus参数 (当前为占位符实现)...")
             script = """
-            // 这里应该是豆包的a_bogus生成算法
-            // 由于算法复杂，这里返回一个占位符
+            // Placeholder for Doubao's a_bogus generation algorithm
             return 'generated_a_bogus_placeholder';
             """
-            
             result = self.driver.execute_script(script)
+            logger.debug(f"a_bogus占位符生成结果: {result}")
             return result
             
         except Exception as e:
-            print(f"生成a_bogus时出现错误: {e}")
+            logger.error(f"生成a_bogus时出现错误: {e}", exc_info=True)
             return "Dj0nDtUEQxR5cplSYCmSHUo5q2A%252FNBuyusi2W7r57KugG7lPeA15xKpKbxTrCumiVmsiiF279jCjTdnOKb-yU81pqmkkSxvbf0IAV66L2qi4G0iQLrf0CukYeJtclQJwmQo6JA6V1UDOIVA1w3a0UdlyyKaxsO0pzNNfdcUGYIz6gMs9FNqQuPGdNXMC0U2b"
     
     def wait_for_image_generation(self, timeout=120):
-        """等待图片生成完成"""
-        print(f"⏳ 开始等待图片生成完成，超时时间: {timeout}秒")
+        """
+        Waits for image generation to complete, then attempts to find, get original URLs,
+        and download the generated images. Returns a list of successfully downloaded filenames.
+        """
+        from selenium.common.exceptions import StaleElementReferenceException
+        logger.info(f"⏳ Starting to wait for image generation, timeout: {timeout}s")
         start_time = time.time()
-        
+        # Counter for unique filenames within this specific call
+        download_counter_this_call = 0
+
         while time.time() - start_time < timeout:
+            elapsed = int(time.time() - start_time)
             try:
-                elapsed = int(time.time() - start_time)
-                
-                # 查找生成状态指示器
-                loading_indicators = [
-                    "//div[contains(@class, 'loading') or contains(@class, 'generating')]",
-                    "//div[contains(text(), '生成中') or contains(text(), '正在生成')]",
-                    "//div[contains(@class, 'spinner') or contains(@class, 'progress')]"
-                ]
-                
-                # 检查是否还在生成中
+                # Check for loading indicators
+                loading_indicators_xpath = "//div[contains(@class, 'loading') or contains(@class, 'generating') or contains(@class, 'spinner') or contains(@class, 'progress') or contains(text(), '生成中') or contains(text(), '正在生成')]"
                 is_generating = False
-                for i, indicator in enumerate(loading_indicators):
-                    try:
-                        elements = self.driver.find_elements(By.XPATH, indicator)
-                        visible_elements = [elem for elem in elements if elem.is_displayed()]
-                        if visible_elements:
-                            is_generating = True
-                            if elapsed % 10 == 0:  # 每10秒打印一次
-                                print(f"🔄 [{elapsed}s] 仍在生成中，找到 {len(visible_elements)} 个加载指示器 (选择器{i+1})")
-                            break
-                    except Exception as e:
-                        if elapsed % 20 == 0:  # 每20秒打印一次错误
-                            print(f"⚠️ 检查加载指示器时出错: {str(e)[:50]}")
-                        continue
+                try:
+                    visible_loaders = [el for el in self.driver.find_elements(By.XPATH, loading_indicators_xpath) if el.is_displayed()]
+                    if visible_loaders:
+                        is_generating = True
+                        if elapsed % 10 == 0:
+                            logger.debug(f"🔄 [{elapsed}s] Still generating, {len(visible_loaders)} loading indicators found.")
+                except Exception as e_loader:
+                    logger.warning(f"⚠️ [{elapsed}s] Error checking loading indicators: {e_loader}, assuming generation is ongoing.")
+                    is_generating = True
                 
-                # 如果没有生成指示器，检查是否有新的图片出现
                 if not is_generating:
-                    if elapsed % 5 == 0:  # 每5秒打印一次
-                        print(f"🔍 [{elapsed}s] 没有发现生成指示器，开始查找图片...")
-                    
-                    # 查找图片元素 - 更新选择器以匹配实际的生成图片
-                    image_elements = self.driver.find_elements(By.XPATH, "//img[contains(@src, 'http')]")
-                    print(f"📊 [{elapsed}s] 页面上共找到 {len(image_elements)} 个img元素")
-                    
-                    # 检查图片是否真正加载完成
-                    valid_images = []
-                    for i, img in enumerate(image_elements):
-                        try:
-                            src = img.get_attribute('src')
-                            if not src:
+                    logger.info(f"🔍 [{elapsed}s] No loading indicators. Attempting to find and download images.")
+                    # get_current_images_traditional returns a list of WebElements
+                    image_elements = self.get_current_images_traditional()
+
+                    if image_elements:
+                        logger.info(f"🎉 Found {len(image_elements)} potential image elements.")
+                        downloaded_files_this_cycle = []
+                        for i, img_element in enumerate(image_elements):
+                            try:
+                                thumbnail_url = img_element.get_attribute('src')
+                                if not thumbnail_url:
+                                    logger.warning(f"Image element {i} has no src attribute. Skipping.")
+                                    continue
+
+                                logger.info(f"Processing image element {i+1}/{len(image_elements)} with src: {thumbnail_url[:70]}...")
+                                # get_original_image_url handles verification internally
+                                original_url = self.get_original_image_url(img_element, thumbnail_url)
+
+                                if original_url: # get_original_image_url should return a verified URL or None
+                                    timestamp_ms = int(time.time() * 1000)
+                                    base_filename = f"generated_image_{timestamp_ms}_{download_counter_this_call}"
+                                    download_counter_this_call += 1
+
+                                    logger.info(f"Attempting to download image from: {original_url[:70]}... with base name {base_filename}")
+                                    # download_image now returns full filename with extension or None
+                                    actual_filename_with_ext = self.download_image(original_url, base_filename)
+                                    if actual_filename_with_ext:
+                                        logger.info(f"✅ Successfully downloaded and verified: {actual_filename_with_ext} from {original_url[:70]}.")
+                                        downloaded_files_this_cycle.append(actual_filename_with_ext)
+                                    else:
+                                        # download_image already logs reasons for failure
+                                        logger.warning(f"❌ Failed to download or verify image from {original_url[:70]}.")
+                                else:
+                                    logger.warning(f"No verifiable original URL found for image with thumbnail: {thumbnail_url[:70]}.")
+                            except StaleElementReferenceException:
+                                logger.warning(f"StaleElementReferenceException while processing image element {i}. Skipping.")
                                 continue
-                                
-                            # 打印每个图片的详细信息
-                            if elapsed % 10 == 0:  # 每10秒详细打印
-                                print(f"  img[{i}]: {src[:60]}...")
-                            
-                            # 更新图片识别逻辑 - 检查是否为生成的图片
-                            is_generated_image = (
-                                # 检查域名和路径
-                                ('byteimg.com' in src and 'image_skill' in src) or
-                                # 保留原有的检查逻辑作为备用
-                                ('doubao' in src or 'bytedance' in src or 'mcs' in src)
-                            )
-                            is_not_svg = not src.endswith('.svg')
-                            is_not_placeholder = 'placeholder' not in src.lower()
-                            is_not_loading = 'loading' not in src.lower()
-                            is_not_logo = not any(x in src.lower() for x in ['logo', 'icon', 'avatar'])
-                            
-                            # 检查CSS类和属性
-                            css_class = img.get_attribute('class') or ''
-                            imagex_type = img.get_attribute('imagex-type')
-                            is_react_image = 'image-' in css_class or imagex_type == 'react'
-                            
-                            if elapsed % 10 == 0:  # 每10秒详细打印
-                                print(f"    生成图片: {is_generated_image}, 非SVG: {is_not_svg}, 非占位符: {is_not_placeholder}")
-                                print(f"    非加载中: {is_not_loading}, 非Logo: {is_not_logo}, React图片: {is_react_image}")
-                            
-                            if (src and is_generated_image and is_not_svg and is_not_placeholder and 
-                                is_not_loading and is_not_logo and is_react_image):
-                                # 检查图片是否真正加载完成
-                                is_complete = self.driver.execute_script(
-                                    "return arguments[0].complete && arguments[0].naturalWidth > 0;", img
-                                )
-                                
-                                if elapsed % 10 == 0:  # 每10秒详细打印
-                                    print(f"    图片加载完成: {is_complete}")
-                                
-                                if is_complete:
-                                    valid_images.append(src)
-                                    if elapsed % 5 == 0:  # 每5秒打印找到的有效图片
-                                        print(f"  ✅ 找到有效图片[{len(valid_images)}]: {src[:60]}...")
-                        except Exception as e:
-                            if elapsed % 20 == 0:  # 每20秒打印一次错误
-                                print(f"    ⚠️ 处理图片元素时出错: {str(e)[:50]}")
-                            continue
-                    
-                    if valid_images:
-                        print(f"🎉 图片生成完成！总共找到 {len(valid_images)} 张有效图片")
-                        for i, url in enumerate(valid_images, 1):
-                            print(f"  有效图片[{i}]: {url[:80]}...")
-                    
-                    # 直接下载找到的有效图片
-                    downloaded_images = []
-                    for i, url in enumerate(valid_images, 1):
-                        try:
-                            print(f"正在下载图片 {i}/{len(valid_images)}: {url[:60]}...")
-                            actual_filename = f"generated_image_{i}"
-                            success = self.download_image(url, actual_filename)
-                            if success:
-                                downloaded_images.append(actual_filename)  # 添加实际文件名
-                                print(f"✅ 图片 {i} 下载成功: {actual_filename}")
-                            else:
-                                print(f"❌ 图片 {i} 下载失败")
-                        except Exception as e:
-                            print(f"❌ 下载图片 {i} 时出错: {str(e)}")
-                    
-                    return downloaded_images
+                            except Exception as e_img_proc:
+                                logger.error(f"Error processing image element {i}: {e_img_proc}", exc_info=True)
+                                continue
+
+                        if downloaded_files_this_cycle:
+                            logger.info(f"Successfully downloaded {len(downloaded_files_this_cycle)} images in this cycle.")
+                            return downloaded_files_this_cycle # Return list of filenames
+                        else:
+                            logger.info("No images were successfully downloaded in this cycle, though elements were found. Waiting for more.")
+                    else:
+                        logger.debug(f"[{elapsed}s] No image elements found by get_current_images_traditional in this cycle.")
                 
-                time.sleep(2)
+                time.sleep(3) # Polling interval: increased slightly to 3s
                 
-            except Exception as e:
-                print(f"❌ 等待图片生成时出错: {str(e)}")
-                time.sleep(2)
+            except Exception as e_loop:
+                logger.error(f"❌ Error during wait_for_image_generation loop: {e_loop}", exc_info=True)
+                time.sleep(3) # Wait before retrying loop
         
-        print(f"⏰ 等待超时 ({timeout}秒)，尝试获取当前页面的图片")
-        return self.get_current_images()
-    
+        # Timeout handling
+        logger.warning(f"⏰ Timeout after {timeout}s waiting for image generation. Attempting to get current images one last time.")
+        final_image_elements = self.get_current_images_traditional()
+        final_downloaded_files = []
+        if final_image_elements:
+            logger.info(f"Timeout fallback: Found {len(final_image_elements)} potential image elements.")
+            for i, img_element in enumerate(final_image_elements):
+                try:
+                    thumbnail_url = img_element.get_attribute('src')
+                    if not thumbnail_url:
+                        logger.warning(f"Timeout fallback: Image element {i} has no src. Skipping.")
+                        continue
+
+                    logger.info(f"Timeout fallback: Processing image {i+1}/{len(final_image_elements)} with src: {thumbnail_url[:70]}...")
+                    original_url = self.get_original_image_url(img_element, thumbnail_url)
+
+                    if original_url:
+                        timestamp_ms = int(time.time() * 1000)
+                        base_filename = f"generated_image_timeout_{timestamp_ms}_{download_counter_this_call}"
+                        download_counter_this_call +=1
+
+                        logger.info(f"Timeout fallback: Attempting download from {original_url[:70]}... with base name {base_filename}")
+                        actual_filename_with_ext = self.download_image(original_url, base_filename)
+                        if actual_filename_with_ext:
+                            logger.info(f"Timeout fallback: ✅ Successfully downloaded and verified {actual_filename_with_ext}.")
+                            final_downloaded_files.append(actual_filename_with_ext)
+                        else:
+                            logger.warning(f"Timeout fallback: ❌ Failed to download or verify from {original_url[:70]}.")
+                    else:
+                        logger.warning(f"Timeout fallback: No verifiable original URL for {thumbnail_url[:70]}.")
+                except StaleElementReferenceException:
+                    logger.warning(f"Timeout fallback: StaleElementReferenceException for image element {i}. Skipping.")
+                except Exception as e_timeout_proc:
+                    logger.error(f"Timeout fallback: Error processing image element {i}: {e_timeout_proc}", exc_info=True)
+
+        if final_downloaded_files:
+            logger.info(f"Timeout fallback: Successfully downloaded {len(final_downloaded_files)} images.")
+        else:
+            logger.warning("Timeout fallback: No images were downloaded.")
+        return final_downloaded_files
+
     def get_current_images(self):
         """获取当前页面的所有生成图片"""
-        # 首先尝试网络监控方法
-        print("尝试通过网络监控获取图片...")
-        network_images = self.get_current_images_with_network_monitoring()
+        logger.info("尝试通过JS辅助方法获取图片...") # Changed print to logger.info
+        network_images = self.get_current_images_with_network_monitoring() # This name is historical
         
         if network_images:
+            logger.info(f"JS辅助方法找到 {len(network_images)} 张图片。") # Changed print to logger.info
             return network_images
         
-        # 如果网络监控失败，回退到原来的方法
-        print("网络监控失败，使用传统方法...")
+        logger.warning("JS辅助方法失败或未找到图片，回退到传统XPath方法...") # Changed print to logger.warning
         return self.get_current_images_traditional()
 
     def find_images_with_javascript(self):
         """使用JavaScript查找图片"""
         script = """
-        // 查找所有包含特定域名的图片
-        const images = Array.from(document.querySelectorAll('img'))
-            .filter(img => {
-                const src = img.src || '';
-                return src.includes('byteimg.com') && 
-                       src.includes('image_skill') &&
-                       img.offsetWidth > 100 && 
-                       img.offsetHeight > 100;
-            })
-            .map(img => ({
-                src: img.src,
-                alt: img.alt,
-                width: img.offsetWidth,
-                height: img.offsetHeight,
-                visible: img.offsetParent !== null
-            }));
-        return images;
+        const images = Array.from(document.querySelectorAll('img'));
+        const uiKeywords = ['logo', 'icon', 'avatar', 'profile', 'button', 'menu', 'banner', 'ad', 'sprite', 'captcha', 'placeholder', 'loading', 'default', 'static', 'assets', 'ui', 'css', 'js', 'track', 'pixel', 'beacon', 'share', 'social', 'favicon', 'emoji', 'sticker'];
+        let generatedImages = [];
+
+        images.forEach(img => {
+            const src = (img.src || '').toLowerCase();
+            const alt = (img.alt || '').toLowerCase();
+
+            // Basic checks for presence of src and minimum dimensions
+            if (!src || img.naturalWidth < 50 || img.naturalHeight < 50) { // Use naturalWidth for actual image size if loaded
+                return;
+            }
+
+            // Check if src or alt contains any UI keywords
+            let isUIElement = false;
+            for (const keyword of uiKeywords) {
+                if (src.includes(keyword) || alt.includes(keyword)) {
+                    isUIElement = true;
+                    break;
+                }
+            }
+            if (isUIElement) {
+                return;
+            }
+
+            // Doubao specific checks (byteimg.com and image_skill are strong indicators)
+            // Also check for imagex-type='react' or class 'image-' as positive signals
+            const imagexType = (img.getAttribute('imagex-type') || '').toLowerCase();
+            const className = (img.className || '').toLowerCase();
+
+            if ( (src.includes('byteimg.com') && src.includes('image_skill')) ||
+                 imagexType === 'react' ||
+                 className.includes('image-') ) {
+                // Additional check for reasonable size (offsetWidth might be 0 if not visible)
+                if (img.offsetWidth > 100 && img.offsetHeight > 100 && img.offsetParent !== null) {
+                     generatedImages.push({
+                        src: img.src, // Keep original casing for src
+                        alt: img.alt, // Keep original casing for alt
+                        width: img.offsetWidth,
+                        height: img.offsetHeight,
+                        visible: true
+                    });
+                }
+            }
+        });
+        return generatedImages;
         """
         
         try:
-            image_data = self.driver.execute_script(script)
-            print(f"JavaScript找到 {len(image_data)} 张图片")
+            image_data_list = self.driver.execute_script(script)
+            logger.info(f"[find_images_with_javascript] JavaScript found {len(image_data_list)} potential images.")
             
-            # 根据JavaScript返回的数据查找实际元素
             all_images = []
-            for data in image_data:
-                try:
-                    img_element = self.driver.find_element(By.XPATH, f"//img[@src='{data['src']}']")
-                    all_images.append(img_element)
-                except:
-                    continue
-                    
+            if image_data_list:
+                for data in image_data_list:
+                    try:
+                        if data and data['src']:
+                            # Find by src, ensure it's exactly the one JS found
+                            # Using a more precise XPath to avoid ambiguity if multiple images have similar processed URLs
+                            img_element = self.driver.find_element(By.XPATH, f"//img[@src='{data['src']}' and @width='{data['width']}' and @height='{data['height']}']")
+                            all_images.append(img_element)
+                        else:
+                            logger.debug("[find_images_with_javascript] Skipping image data with no src or dimensions.")
+                    except Exception as e_find:
+                        logger.debug(f"[find_images_with_javascript] Could not precisely find element for src {data.get('src', 'N/A')} with reported dimensions: {e_find}")
+                        # Fallback to just src if precise match fails
+                        try:
+                            img_element = self.driver.find_element(By.XPATH, f"//img[@src='{data['src']}']")
+                            all_images.append(img_element)
+                            logger.debug(f"[find_images_with_javascript] Found element with src {data.get('src', 'N/A')} using fallback XPath.")
+                        except Exception as e_find_fallback:
+                             logger.debug(f"[find_images_with_javascript] Fallback XPath also failed for src {data.get('src', 'N/A')}: {e_find_fallback}")
+                        continue
             return all_images
         except Exception as e:
-            print(f"JavaScript查找失败: {e}")
+            logger.error(f"[find_images_with_javascript] JavaScript execution or processing failed: {e}", exc_info=True)
             return []
 
     def get_current_images_traditional(self):
         """传统的图片获取方法（通过多种策略获取所有生成的原图）"""
         try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            
-            # 等待页面完全加载
-            time.sleep(3)
-            
-            # 首先尝试JavaScript方法
-            js_images = self.find_images_with_javascript()
+            # from selenium.webdriver.common.action_chains import ActionChains # Not used directly here
+            from selenium.common.exceptions import StaleElementReferenceException
+
+            logger.info("[get_current_images_traditional] Starting traditional image retrieval.")
+            time.sleep(1) # Reduced sleep, page should be mostly stable
+
+            candidate_elements = []
+            js_images = self.find_images_with_javascript() # Use improved JS function
             if js_images:
-                print(f"JavaScript方法找到 {len(js_images)} 张图片")
-                all_images = js_images
+                logger.info(f"[get_current_images_traditional] Found {len(js_images)} candidate images via JavaScript.")
+                candidate_elements.extend(js_images)
             else:
-                print("JavaScript方法失败，使用传统选择器")
-                # 针对豆包新版界面的精确选择器（更新后的选择器）
+                logger.info("[get_current_images_traditional] JavaScript method found no images, trying XPath selectors.")
+                # Refined and more specific selectors
                 image_selectors = [
-                    # 主要选择器：图片网格项中的图片
-                    "//div[contains(@class, 'image-box-grid-item')]//img[contains(@class, 'image-') and contains(@src, 'http')]",
-                    # 备用选择器：通过data-testid定位
-                    "//div[@data-testid='mdbox_image']//img[contains(@src, 'http')]",
-                    # 图片包装器中的图片
-                    "//div[contains(@class, 'image-wrapper')]//img[contains(@src, 'http')]",
-                    # 更新的豆包域名图片选择器 - 关键：byteimg.com + image_skill
-                    "//img[contains(@src, 'byteimg.com') and contains(@src, 'image_skill')]",
-                    "//img[contains(@src, 'flow-imagex-sign.byteimg.com')]",
-                    "//img[contains(@src, 'ocean-cloud-tos')]",
-                    # 通过特殊属性定位 - imagex-type='react'是关键特征
-                    "//img[@imagex-type='react']",
-                    "//img[contains(@class, 'image-')]",
-                    # picture元素中的img
-                    "//picture//img[contains(@src, 'http')]"
+                    "//img[@imagex-type='react' and contains(@src, 'byteimg.com/image_skill/') and not(contains(@src, 'gif'))]",
+                    "//div[contains(@class, 'image-box') or contains(@class, 'img-list-item')]//img[contains(@src, 'byteimg.com/image_skill/')]",
+                    "//img[contains(@class, 'image-') and contains(@src, 'byteimg.com') and contains(@src, 'image_skill')]",
+                    "//img[contains(@src, 'ocean-cloud-tos') and contains(@src, 'image_skill') and not(contains(@src, 'gif'))]",
+                    "//picture[contains(@class, 'image-card')]//img[contains(@src, 'byteimg.com')]" # Picture elements often wrap generated images
                 ]
                 
-                all_images = []
-                
-                # 收集所有可能的图片元素
-                for selector in image_selectors:
+                raw_elements_from_selectors = []
+                for idx, selector in enumerate(image_selectors):
                     try:
                         elements = self.driver.find_elements(By.XPATH, selector)
-                        all_images.extend(elements)
-                        print(f"选择器 '{selector}' 找到 {len(elements)} 张图片")
-                    except Exception as e:
-                        print(f"选择器 '{selector}' 执行失败: {e}")
-                        continue
+                        if elements:
+                            logger.debug(f"[get_current_images_traditional] Selector {idx+1} ('{selector[:50]}...') found {len(elements)} elements.")
+                            raw_elements_from_selectors.extend(elements)
+                    except Exception as e_sel:
+                        logger.warning(f"[get_current_images_traditional] Selector '{selector[:50]}...' failed: {e_sel}")
+
+                if raw_elements_from_selectors:
+                    candidate_elements.extend(list(dict.fromkeys(raw_elements_from_selectors))) # Deduplicate elements from XPath
             
-            # 添加调试信息
-            print("\n=== 调试信息：所有找到的图片 ===")
-            for i, img in enumerate(all_images):
-                try:
-                    src = img.get_attribute('src')
-                    imagex_type = img.get_attribute('imagex-type')
-                    img_class = img.get_attribute('class')
-                    print(f"图片 {i+1}:")
-                    print(f"  URL: {src}")
-                    print(f"  imagex-type: {imagex_type}")
-                    print(f"  class: {img_class}")
-                    print(f"  is_likely_generated: {self.is_likely_generated_image(src)}")
-                    print("---")
-                except Exception as e:
-                    print(f"获取图片 {i+1} 信息失败: {e}")
-            
-            # 去重并筛选有效图片
-            unique_images = []
+            if not candidate_elements:
+                logger.warning("[get_current_images_traditional] No candidate image elements found from JS or XPath.")
+                return []
+
+            logger.info(f"[get_current_images_traditional] Collected {len(candidate_elements)} raw candidate image elements in total.")
+            unique_images_elements = list(dict.fromkeys(candidate_elements)) # Final deduplication
+            logger.info(f"[get_current_images_traditional] Deduplicated to {len(unique_images_elements)} unique candidate elements.")
+
+
+            filtered_image_elements = []
             seen_srcs = set()
             
-            for img in all_images:
+            for i, img_element in enumerate(unique_images_elements):
                 try:
-                    src = img.get_attribute('src')
+                    src = img_element.get_attribute('src')
                     if not src or src in seen_srcs:
+                        if src in seen_srcs:
+                            logger.debug(f"[get_current_images_traditional] Skipping already seen src: {src[:60]}...")
+                        continue
+
+                    if not self.is_likely_generated_image(src):
+                        logger.debug(f"[get_current_images_traditional] Filtered out by is_likely_generated_image: {src[:60]}...")
                         continue
                     
-                    # 检查特殊属性 - 这些是豆包生成图片的关键标识
-                    has_imagex_type = img.get_attribute('imagex-type') == 'react'
-                    has_image_class = 'image-' in (img.get_attribute('class') or '')
+                    # Structural checks (attributes, class)
+                    imagex_type = img_element.get_attribute('imagex-type')
+                    img_class = img_element.get_attribute('class') or ''
                     
-                    # 更严格的图片URL验证 - 排除logo等非生成图片
-                    is_not_logo = 'logo' not in src.lower()
-                    is_not_icon = 'icon' not in src.lower()
-                    is_not_avatar = 'avatar' not in src.lower()
-                    
-                    if (self.is_likely_generated_image(src) and 
-                        (has_imagex_type or has_image_class) and
-                        is_not_logo and is_not_icon and is_not_avatar):
-                        unique_images.append(img)
-                        seen_srcs.add(src)
-                        print(f"发现有效图片: {src[:60]}...")
-                        if has_imagex_type:
-                            print(f"  ✓ 包含imagex-type='react'属性")
-                        if has_image_class:
-                            print(f"  ✓ 包含image-类名")
-                        print(f"  ✓ 已排除logo/icon/avatar")
-                except:
-                    continue
-                
-            print(f"\n总共找到 {len(unique_images)} 张有效的生成图片")
-            print("强制测试原图获取功能...")
-            
-            if unique_images:
-                test_img = unique_images[0]
-                test_src = test_img.get_attribute('src')
-                print(f"测试图片URL: {test_src}")
-                original_url = self.get_original_image_url(test_img, test_src)
-                print(f"原图获取结果: {original_url}")
-            else:
-                print("未找到任何图片，尝试等待更长时间...")
-                time.sleep(5)
-                # 重新尝试最基本的选择器
-                basic_images = self.driver.find_elements(By.XPATH, "//img[contains(@src, 'http')]")
-                print(f"基础选择器找到 {len(basic_images)} 张图片")
-                for img in basic_images:
+                    is_positive_indicator = (imagex_type == 'react') or \
+                                            ('image-' in img_class) or \
+                                            ('generated' in img_class) or \
+                                            ('creation' in img_class)
+
+                    # Dimension check
                     try:
-                        src = img.get_attribute('src')
-                        imagex_type = img.get_attribute('imagex-type')
-                        img_class = img.get_attribute('class')
-                        print(f"  - {src[:80]}...")
-                        print(f"    imagex-type: {imagex_type}")
-                        print(f"    class: {img_class}")
-                    except:
-                        pass
-                return []
-            
-            print("\n开始处理图片，获取原图URL...")  # 添加这行调试信息
-            
-            valid_images = []
-                
-            # 处理每张图片
-            for i, img in enumerate(unique_images, 1):
-                try:
-                    src = img.get_attribute('src')
-                    print(f"\n=== 处理第 {i} 张图片 ===")
-                    print(f"缩略图URL: {src}")
-                    
-                    # 滚动到图片位置
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img)
-                    time.sleep(1)
-                    
-                    # 尝试多种方法获取原图
-                    original_url = self.get_original_image_url(img, src)
-                    
-                    if original_url and original_url != src:
-                        print(f"✅ 成功获取原图URL: {original_url}")
-                        print(f"📏 URL长度对比 - 缩略图: {len(src)}, 原图: {len(original_url)}")
-                        valid_images.append(original_url)
+                        # Ensure element is visible for size check to be meaningful
+                        if not img_element.is_displayed():
+                            logger.debug(f"[get_current_images_traditional] Skipping non-displayed image: {src[:60]}...")
+                            continue
+                        width = img_element.size.get('width', 0)
+                        height = img_element.size.get('height', 0)
+                        if not (width > 80 and height > 80): # Slightly reduced minimum dimensions
+                            logger.debug(f"[get_current_images_traditional] Filtered out by size ({width}x{height}): {src[:60]}...")
+                            continue
+                    except StaleElementReferenceException:
+                        logger.warning(f"[get_current_images_traditional] Stale element for image {src[:60]} during size check, skipping.")
+                        continue
+                    except Exception as e_size:
+                        logger.warning(f"[get_current_images_traditional] Error checking size for {src[:60]}...: {e_size}, proceeding with caution.")
+
+                    # If it has positive structural indicators OR is from a highly trusted source pattern
+                    if is_positive_indicator or ('byteimg.com/image_skill/' in src) or ('ocean-cloud-tos' in src and 'image_skill' in src) :
+                        filtered_image_elements.append(img_element)
+                        seen_srcs.add(src)
+                        logger.info(f"[get_current_images_traditional] Added valid image element: {src[:60]} (Indicator: {is_positive_indicator}, Class: {img_class})")
                     else:
-                        print(f"❌ 原图获取失败，使用缩略图: {src}")
-                        # 尝试手动转换URL
-                        converted_url = self.convert_to_original_url_enhanced(src)
-                        if converted_url != src:
-                            print(f"🔄 尝试URL转换: {converted_url}")
-                            valid_images.append(converted_url)
-                        else:
-                            valid_images.append(src)
-                    
-                except Exception as e:
-                    print(f"处理第 {i} 张图片时出现错误: {e}")
+                        logger.debug(f"[get_current_images_traditional] Filtered out (lacked strong indicators & not from primary CDN path): {src[:60]}...")
+
+                except StaleElementReferenceException:
+                    logger.warning(f"[get_current_images_traditional] Stale element for element at index {i}, skipping.")
+                    continue
+                except Exception as e_filter: # Catch other errors during this complex filtering
+                    logger.error(f"[get_current_images_traditional] Error filtering image at index {i}: {e_filter}", exc_info=True)
                     continue
             
-            print(f"\n最终获取到 {len(valid_images)} 张原图URL")
-            return valid_images
+            logger.info(f"[get_current_images_traditional] Filtered down to {len(filtered_image_elements)} strong candidate image elements.")
+            
+            if not filtered_image_elements:
+                logger.warning("[get_current_images_traditional] No valid generated images found after all filtering.")
+                return []
+
+            valid_image_urls = []
+            for i, img_element_to_process in enumerate(filtered_image_elements, 1):
+                src_to_process = "N/A"
+                try:
+                    src_to_process = img_element_to_process.get_attribute('src')
+                    if not src_to_process: continue # Should have src if it passed filters
+
+                    logger.info(f"[get_current_images_traditional] Processing URL for image {i}/{len(filtered_image_elements)}: {src_to_process[:70]}...")
+                    
+                    self.driver.execute_script("arguments[0].scrollIntoView({ behavior: 'smooth', block: 'center' });", img_element_to_process)
+                    time.sleep(0.3) # Shorter sleep, just for scroll to settle
+                    
+                    original_url = self.get_original_image_url(img_element_to_process, src_to_process) # This now calls verify_image_accessibility
+                    
+                    # get_original_image_url itself now handles verification and logging of success/failure
+                    # It returns the original URL if found and verified, otherwise the (verified) thumbnail.
+                    # So, we just add what it returns, provided it's a URL.
+                    if original_url and isinstance(original_url, str) and original_url.startswith('http'):
+                         valid_image_urls.append(original_url)
+                    elif src_to_process: # Fallback if original_url is somehow invalid
+                         logger.warning(f"[get_current_images_traditional] get_original_image_url did not return a valid URL for {src_to_process}, using src after conversion and verification.")
+                         fallback_url = self.convert_to_original_url_enhanced(src_to_process)
+                         if self.verify_image_accessibility(fallback_url):
+                            valid_image_urls.append(fallback_url)
+                         else:
+                            logger.error(f"[get_current_images_traditional] Fallback URL {fallback_url} also not accessible for {src_to_process}.")
+
+                except StaleElementReferenceException:
+                    logger.warning(f"[get_current_images_traditional] Stale element when processing image {i} ({src_to_process[:70]}...), skipping.")
+                except Exception as e_proc:
+                    logger.error(f"[get_current_images_traditional] Error processing image {i} ({src_to_process[:70]}...): {e_proc}", exc_info=True)
+                    if src_to_process and src_to_process.startswith('http'): # Last resort, add original src if known
+                        valid_image_urls.append(src_to_process)
+                    continue
+            
+            final_urls = list(dict.fromkeys(valid_image_urls)) # Deduplicate final list
+            logger.info(f"[get_current_images_traditional] Final list of {len(final_urls)} image URLs prepared.")
+            return final_urls
             
         except Exception as e:
-            print(f"获取图片时出现错误: {e}")
+            logger.error(f"[get_current_images_traditional] Major error in image retrieval: {e}", exc_info=True)
             return []
 
     def get_original_image_url(self, img_element, thumbnail_url):
         """获取图片的原图URL"""
         from selenium.webdriver.common.action_chains import ActionChains
+        from selenium.webdriver.common.keys import Keys # Ensure Keys is imported
         actions = ActionChains(self.driver)
-        original_url_found = None
         
+        # Method 1: Check picture element
+        logger.info("[get_original_image_url] Attempting method 1: Get URL from picture element")
         try:
-            # 方法1: 从picture元素的source标签获取原图
-            print("[get_original_image_url] 尝试方法1: 从picture元素获取原图")
             picture_url = self.get_original_url_from_picture_element(img_element)
-            if picture_url and picture_url != thumbnail_url:
-                print(f"[get_original_image_url] ✅ 从picture元素获取到原图URL: {picture_url}")
+            if picture_url and picture_url != thumbnail_url and self.verify_image_accessibility(picture_url):
+                logger.info(f"[get_original_image_url] Original URL found via picture element: {picture_url}")
                 return picture_url
-            
-            # 方法2: 尝试从图片元素属性获取并转换
-            print("[get_original_image_url] 尝试方法2: 从元素属性获取并转换")
-            try:
-                real_url = self.get_image_real_url(img_element)
-                if real_url and real_url != thumbnail_url:
-                    print(f"[get_original_image_url] ✅ 通过元素属性获取到原图URL: {real_url}")
-                    original_url_found = real_url
-            except Exception as e:
-                print(f"[get_original_image_url] 从元素属性获取URL时出错: {e}")
-            
-            if original_url_found:
-                return original_url_found
-            
-            # 方法3: 查找下载按钮
-            print("[get_original_image_url] 尝试方法3: 查找下载按钮")
-            
-            # 先滚动到图片位置
+        except Exception as e:
+            logger.error(f"[get_original_image_url] Error getting URL from picture element: {e}")
+
+        # Method 2: Find and interact with a download button
+        logger.info("[get_original_image_url] Attempting method 2: Find and interact with download button")
+        try:
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img_element)
             time.sleep(1)
-            
-            # 鼠标悬停到图片上
             actions.move_to_element(img_element).perform()
-            time.sleep(3)
-            
-            # 下载按钮选择器
+            time.sleep(1) # Reduced sleep time after hover
+
             download_selectors = [
+                ".//ancestor::div[contains(@class, 'image-actions')]//button[contains(@aria-label, '下载') or contains(@title, '下载')]", # More specific
                 "//div[contains(@class, 'image-') or contains(@class, 'img-')]//button[contains(@class, 'download') or contains(@title, 'download') or contains(@aria-label, 'download')]",
                 "//div[contains(@class, 'image-') or contains(@class, 'img-')]//a[contains(@class, 'download') or contains(@title, 'download')]",
-                ".//ancestor::div[contains(@class, 'image') or contains(@class, 'img') or contains(@class, 'picture')]//button",
+                ".//ancestor::div[contains(@class, 'image') or contains(@class, 'img') or contains(@class, 'picture')]//button[contains(., '下载') or contains(@aria-label, '下载')]",
                 ".//ancestor::div[1]//button[contains(@class, 'download') or contains(@title, '下载') or contains(@aria-label, 'download') or contains(text(), '下载') or contains(@class, 'btn')]",
                 ".//ancestor::div[2]//button[contains(@class, 'download') or contains(@title, '下载') or contains(@aria-label, 'download') or contains(text(), '下载') or contains(@class, 'btn')]",
-                ".//ancestor::div[3]//button[contains(@class, 'download') or contains(@title, '下载') or contains(@aria-label, 'download') or contains(text(), '下载') or contains(@class, 'btn')]",
-                "//button[contains(@style, 'visible') or contains(@style, 'block')][contains(@class, 'download') or contains(@title, 'download') or contains(@aria-label, 'download')]",
-                "//div[contains(@style, 'visible') or contains(@style, 'block')]//button",
-                "//button[contains(@class, 'download') or contains(@title, '下载') or contains(@aria-label, 'download') or contains(text(), '下载')]",
-                "//a[contains(@class, 'download') or contains(@href, 'download') or contains(@title, '下载')]",
-                ".//ancestor::div[1]//button[not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]",
-                ".//ancestor::div[2]//button[not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]",
+                "//button[contains(@class, 'download') or contains(@title, '下载') or contains(@aria-label, '下载') or contains(text(), '下载')]",
             ]
             
-            for i, selector in enumerate(download_selectors):
-                try:
-                    if selector.startswith('.//'):  # 相对于图片元素查找
+            for selector in download_selectors:
+                buttons = []
+                if selector.startswith('.//'):
+                    try:
                         buttons = img_element.find_elements(By.XPATH, selector)
-                    else:  # 全局查找
+                    except: continue
+                else:
+                    try:
                         buttons = self.driver.find_elements(By.XPATH, selector)
-                    
-                    for j, button in enumerate(buttons):
-                        try:
-                            if button.is_displayed() and button.is_enabled():
-                                # 点击按钮
-                                try:
-                                    button.click()
-                                except:
-                                    self.driver.execute_script("arguments[0].click();", button)
-                                
-                                time.sleep(4)
-                                
-                                # 检查是否有新窗口或下载链接
-                                download_url = self.get_download_url_from_browser()
-                                if download_url and download_url != thumbnail_url:
-                                    print(f"[get_original_image_url] ✅ 通过下载按钮获取到原图URL: {download_url}")
-                                    original_url_found = download_url
-                                    break
-                        except Exception as e:
-                            continue
-                    
-                    if original_url_found:
+                    except: continue
+                
+                for button in buttons:
+                    try:
+                        if button.is_displayed() and button.is_enabled():
+                            # Attempt to get URL from href if it's an <a> tag
+                            if button.tag_name == 'a' and button.get_attribute('href'):
+                                potential_url = button.get_attribute('href')
+                                if self.verify_image_accessibility(potential_url):
+                                    logger.info(f"[get_original_image_url] Original URL found via download button (href): {potential_url}")
+                                    return potential_url
+                            
+                            # Click the button and check for new URL
+                            self.driver.execute_script("arguments[0].click();", button)
+                            time.sleep(2) # Wait for action to complete
+
+                            download_url = self.get_download_url_from_browser() # Assumes this method checks network or new tab
+                            if download_url and download_url != thumbnail_url and self.verify_image_accessibility(download_url):
+                                logger.info(f"[get_original_image_url] Original URL found via download button (click): {download_url}")
+                                return download_url
+                    except Exception as e:
+                        logger.warning(f"[get_original_image_url] Error interacting with download button (selector: {selector}): {e}")
+                        continue
+        except Exception as e:
+            logger.error(f"[get_original_image_url] Error finding/interacting with download button: {e}")
+
+        # Method 3: Check image attributes
+        logger.info("[get_original_image_url] Attempting method 3: Get URL from image attributes")
+        try:
+            attributes_to_check = ['data-original', 'data-src', 'data-full-url', 'src']
+            for attr in attributes_to_check:
+                potential_url = img_element.get_attribute(attr)
+                if potential_url:
+                    # Try converting to a more "original" version if needed
+                    converted_url = self.convert_to_original_url_enhanced(potential_url)
+                    if converted_url and converted_url != thumbnail_url and self.verify_image_accessibility(converted_url):
+                        logger.info(f"[get_original_image_url] Original URL found via attribute '{attr}': {converted_url}")
+                        return converted_url
+                    # Check original potential_url if conversion is not different or not better
+                    if potential_url != thumbnail_url and self.verify_image_accessibility(potential_url):
+                        logger.info(f"[get_original_image_url] Original URL found via attribute '{attr}' (no conversion): {potential_url}")
+                        return potential_url
+        except Exception as e:
+            logger.error(f"[get_original_image_url] Error getting URL from attributes: {e}")
+
+        # Method 4: Context menu (lower priority)
+        logger.info("[get_original_image_url] Attempting method 4: Get URL from context menu")
+        try:
+            actions.context_click(img_element).perform()
+            time.sleep(1)
+
+            context_options = [
+                "//div[contains(text(), '在新标签页中打开图片') or contains(text(), 'Open image in new tab')]",
+                "//span[contains(text(), '在新标签页中打开图片') or contains(text(), 'Open image in new tab')]"
+            ]
+
+            for option_xpath in context_options:
+                try:
+                    option = WebDriverWait(self.driver, 2).until(
+                        EC.element_to_be_clickable((By.XPATH, option_xpath))
+                    )
+                    if option.is_displayed():
+                        option.click()
+                        time.sleep(2)
+
+                        if len(self.driver.window_handles) > 1:
+                            original_window = self.driver.current_window_handle
+                            new_window = [h for h in self.driver.window_handles if h != original_window][0]
+                            self.driver.switch_to.window(new_window)
+
+                            current_url = self.driver.current_url
+                            self.driver.close() # Close new tab
+                            self.driver.switch_to.window(original_window) # Switch back
+
+                            if current_url and current_url != thumbnail_url and self.verify_image_accessibility(current_url):
+                                logger.info(f"[get_original_image_url] Original URL found via context menu: {current_url}")
+                                return current_url
                         break
-                except Exception as e:
+                except:
                     continue
             
-            if original_url_found:
-                return original_url_found
-            
-            # 方法4: 右键菜单获取原图
-            print("[get_original_image_url] 尝试方法4: 右键菜单获取原图")
-            try:
-                actions.context_click(img_element).perform()
-                time.sleep(1)
-                
-                # 查找"在新标签页中打开图片"选项
-                context_options = [
-                    "//div[contains(text(), '在新标签页中打开图片') or contains(text(), 'Open image in new tab')]",
-                    "//span[contains(text(), '在新标签页中打开图片') or contains(text(), 'Open image in new tab')]"
-                ]
-                
-                for option_xpath in context_options:
-                    try:
-                        option = self.driver.find_element(By.XPATH, option_xpath)
-                        if option.is_displayed():
-                            option.click()
-                            time.sleep(2)
-                            
-                            # 切换到新标签页获取URL
-                            if len(self.driver.window_handles) > 1:
-                                original_window = self.driver.current_window_handle
-                                new_window = [h for h in self.driver.window_handles if h != original_window][0]
-                                self.driver.switch_to.window(new_window)
-                                
-                                current_url = self.driver.current_url
-                                if self.is_valid_image_url(current_url) and current_url != thumbnail_url:
-                                    print(f"[get_original_image_url] ✅ 通过右键菜单获取到原图URL: {current_url}")
-                                    self.driver.close()
-                                    self.driver.switch_to.window(original_window)
-                                    original_url_found = current_url
-                                    break
-                                else:
-                                    self.driver.close()
-                                    self.driver.switch_to.window(original_window)
-                            break
-                    except:
-                        continue
-                
-                # 按ESC关闭右键菜单
-                actions.send_keys(Keys.ESCAPE).perform()
-                
-                if original_url_found:
-                    return original_url_found
-            except Exception as e:
-                print(f"[get_original_image_url] 右键菜单方法出错: {e}")
-            
+            # Press ESC to close context menu if it's still open
+            actions.send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.5)
+
         except Exception as e:
-            print(f"[get_original_image_url] 获取原图URL时出现错误: {e}")
-        
+            logger.error(f"[get_original_image_url] Error with context menu method: {e}")
+            # Ensure ESC is sent if an error occurs during context menu interaction
+            try:
+                actions.send_keys(Keys.ESCAPE).perform()
+            except:
+                pass
+
+        logger.warning(f"[get_original_image_url] No original URL found, returning thumbnail: {thumbnail_url}")
         return thumbnail_url
 
     def get_original_url_from_picture_element(self, img_element):
@@ -680,190 +694,251 @@ class DoubaoImageGenerator:
                     return None
             
             if picture_element:
-                print(f"[get_original_url_from_picture_element] 找到picture元素")
-                
-                # 优先获取AVIF格式的source元素
+                logger.debug(f"[get_original_url_from_picture_element] 找到picture元素 for img_element.")
                 source_selectors = [
-                    ".//source[@type='image/avif']",
-                    ".//source[contains(@srcset, 'avif')]",
-                    ".//source[@type='image/webp']", 
-                    ".//source[contains(@srcset, 'webp')]"
+                    ".//source[@type='image/avif']", ".//source[contains(@srcset, 'avif')]",
+                    ".//source[@type='image/webp']", ".//source[contains(@srcset, 'webp')]",
+                    ".//source" # Fallback to any source
                 ]
                 
                 for selector in source_selectors:
                     try:
                         sources = picture_element.find_elements(By.XPATH, selector)
                         for source in sources:
-                            # 获取srcset或src属性
                             srcset = source.get_attribute('srcset') or source.get_attribute('src')
                             if srcset:
-                                # 从srcset中提取第一个URL（通常是1x的版本）
-                                url = srcset.split(' ')[0].split(',')[0].strip()
-                                if url and 'byteimg.com' in url:
-                                    print(f"[get_original_url_from_picture_element] 从{source.get_attribute('type')}获取到URL: {url}")
-                                    
-                                    # 转换为原图URL（去除水印标识）
-                                    original_url = self.convert_to_original_url_enhanced(url)
-                                    if original_url != url:
-                                        print(f"[get_original_url_from_picture_element] 转换后的原图URL: {original_url}")
-                                        return original_url
-                                    else:
-                                        return url
-                    except Exception as e:
-                        print(f"[get_original_url_from_picture_element] 处理source元素时出错: {e}")
+                                url = srcset.split(' ')[0].split(',')[0].strip() # Get first URL from srcset
+                                if url and 'byteimg.com' in url: # Ensure it's a relevant domain
+                                    logger.debug(f"[get_original_url_from_picture_element] 从 <source {source.get_attribute('type') or ''}> 获取到URL: {url}")
+                                    # URL conversion happens in get_original_image_url before verification
+                                    return url
+                    except Exception as e_src:
+                        logger.debug(f"[get_original_url_from_picture_element] 处理source元素时出错 (selector: {selector}): {e_src}")
                         continue
-            
+            else:
+                logger.debug("[get_original_url_from_picture_element] 未找到父级picture元素。")
             return None
             
         except Exception as e:
-            print(f"[get_original_url_from_picture_element] 获取picture元素URL时出错: {e}")
+            logger.error(f"[get_original_url_from_picture_element] 获取picture元素URL时出错: {e}", exc_info=True)
             return None
 
     def convert_to_original_url_enhanced(self, thumbnail_url):
         """增强的URL转换方法"""
-        try:
-            import re
-            original_url = thumbnail_url
-            
-            print(f"原始缩略图URL: {thumbnail_url}")
-            
-            # 豆包特定的转换规则 - 更全面的缩略图转原图处理
-            doubao_conversions = [
-                # 移除所有类型的缩略图和水印标识
-                (r'~tplv-[^?]+', ''),  # 移除整个tplv参数
-                
-                # 专门处理各种水印和缩略图标识
-                (r'-web-thumb-watermark-v2', ''),  # v2版本水印
-                (r'-web-thumb-watermark', ''),     # 标准水印
-                (r'-web-thumb-wm', ''),            # 简化水印标识
-                (r'-watermark-v2', ''),            # v2水印
-                (r'-watermark', ''),               # 水印
-                (r'-thumb', ''),                   # 缩略图
-                (r'-wm', ''),                      # 简化水印
-                
-                # 移除格式转换后缀
-                (r'-avif\.avif$', ''),            # 移除avif格式
-                (r'-webp\.webp$', ''),            # 移除webp格式
-                (r'\.avif$', '.jpeg'),            # avif转jpeg
-                (r'\.webp$', '.jpeg'),            # webp转jpeg
-                
-                # 移除URL参数中的处理参数
-                (r'\?[^?]*tplv[^&]*', ''),         # 移除URL参数中的tplv
-                (r'&[^&]*tplv[^&]*', ''),
-                
-                # 移除尺寸和质量限制参数
-                (r'[?&]w=\d+', ''),
-                (r'[?&]h=\d+', ''),
-                (r'[?&]s=\d+', ''),
-                (r'[?&]size=\d+', ''),
-                (r'[?&]quality=\d+', ''),
-                (r'[?&]format=\w+', ''),
-                (r'[?&]f=\w+', ''),
-                
-                # 移除签名参数（这些参数可能导致原图访问失败）
-                (r'[?&]rk3s=[^&]*', ''),
-                (r'[?&]x-expires=[^&]*', ''),
-                (r'[?&]x-signature=[^&]*', ''),
-            ]
-            
-            # 应用转换规则
-            for pattern, replacement in doubao_conversions:
-                old_url = original_url
+        if not thumbnail_url: # Ensure re is imported
+            return thumbnail_url
+
+        # Ensure re is available, it should be imported at the top of the file
+        # import re
+
+        original_url = thumbnail_url
+        logger.info(f"[convert_to_original_url_enhanced] Original thumbnail URL: {thumbnail_url}")
+
+        # General and Doubao-specific conversion rules
+        conversion_rules = [
+            # Remove Doubao specific tplv parameters (often includes processing instructions)
+            (r'~tplv-[^?&]+', ''),
+
+            # Remove common web thumbnail/watermark identifiers
+            (r'-web-thumb-watermark-v2', ''),
+            (r'-web-thumb-watermark', ''),
+            (r'-web-thumb-wm', ''),
+            (r'-watermark-v2', ''),
+            (r'-watermark', ''),
+            (r'-thumb', ''),
+            (r'-wm', ''),
+            (r'_thumb\b', ''), # Suffix _thumb
+            (r'\.thumb\b', ''), # .thumb before extension
+
+            # Remove format specific suffixes that might indicate conversion
+            (r'-avif\.avif$', ''),
+            (r'-webp\.webp$', ''),
+
+            # Attempt to change suspicious formats to a common original format (JPEG or PNG)
+            # These rules are more aggressive and should be placed after specific removals
+            (r'\.avif(\?|$)', '.jpeg\\1'), # Convert .avif to .jpeg, keeping query params
+            (r'\.webp(\?|$)', '.jpeg\\1'), # Convert .webp to .jpeg, keeping query params
+
+            # Remove specific path segments indicating thumbnails or previews
+            (r'/thumb/', '/'),
+            (r'/preview/', '/'),
+            (r'/small/', '/'),
+            (r'/medium/', '/'),
+            (r'/large/', '/'), # Sometimes 'large' is still not original
+
+            # Remove common CDN query parameters for resizing, quality, format
+            (r'[?&](w|h|width|height|size|s|dim)=\d+&?', '', True), # Dimension params
+            (r'[?&](quality|q)=\d+&?', '', True),                  # Quality params
+            (r'[?&](format|fm|f)=(jpeg_thumb|jpg_thumb|png_thumb|webp_thumb|avif_thumb|jpeg|png|webp|avif)&?', '', True), # Format params
+            (r'[?&]Strip=all&?', '', True),                       # Stripping metadata
+            (r'[?&]fit=(min|max|crop|fill|scale)&?', '', True),    # Fit params
+            (r'[?&]crop=[^&]+&?', '', True),                       # Crop params
+            (r'[?&]auto=compress&?', '', True),                   # Auto compress
+
+            # Remove Doubao/Bytedance specific query parameters if they weren't caught by tplv
+            (r'\?[^?]*tplv[^&]*', '', False), # More generic tplv in query
+            (r'&[^&]*tplv[^&]*', '', False),
+
+            # Remove signature parameters (often tied to specific thumbnail settings)
+            (r'[?&]rk3s=[^&]*', '', False),
+            (r'[?&]x-expires=[^&]*', '', False),
+            (r'[?&]x-signature=[^&]*', '', False),
+            (r'[?&]sign=[^&]*', '', False),
+        ]
+
+        for rule_set in conversion_rules:
+            pattern, replacement = rule_set[0], rule_set[1]
+            is_query_param_removal = rule_set[2] if len(rule_set) > 2 else False
+
+            old_url = original_url
+
+            if is_query_param_removal:
+                # Iteratively remove query parameters to handle multiple occurrences and ordering
+                temp_url = original_url
+                while True:
+                    # Ensure the pattern correctly handles being the first, middle or last param
+                    # Adjusted regex to better handle leading ? or &
+                    # e.g. (?<=[?&])param=value&?  or  \?param=value&? (for first param)
+                    # For simplicity, we'll just remove and then clean up ?, & later
+                    updated_url = re.sub(pattern, replacement, temp_url, count=1)
+                    if updated_url == temp_url: # No more occurrences of this pattern
+                        break
+                    temp_url = updated_url
+                original_url = temp_url
+            else:
                 original_url = re.sub(pattern, replacement, original_url)
-                if old_url != original_url:
-                    print(f"✓ 应用规则 '{pattern}': 移除了缩略图标识")
-            
-            # 清理多余的参数分隔符
-            original_url = re.sub(r'[?&]+$', '', original_url)
-            original_url = re.sub(r'[?]&', '?', original_url)
-            original_url = re.sub(r'&&+', '&', original_url)
-            
-            print(f"转换后原图URL: {original_url}")
-            
-            # 如果转换后的URL与原URL相同，尝试更激进的方法
-            if original_url == thumbnail_url:
-                print("常规转换无效，尝试提取基础URL...")
-                # 提取基础URL（去掉所有处理参数）
-                base_match = re.match(r'(https://[^~?]+)', thumbnail_url)
-                if base_match:
-                    base_url = base_match.group(1)
-                    # 确保是jpeg格式
-                    if not base_url.endswith(('.jpg', '.jpeg', '.png')):
-                        base_url += '.jpeg'
-                    print(f"使用基础URL: {base_url}")
-                    return base_url
+
+            if old_url != original_url:
+                logger.debug(f"URL before rule '{pattern}': {old_url}")
+                logger.debug(f"URL after rule '{pattern}': {original_url}")
+
+        # Clean up URL structure
+        # Remove trailing '?' or '&'
+        original_url = re.sub(r'[?&]+$', '', original_url)
+        # Replace '?&' with '?'
+        original_url = re.sub(r'\?&', '?', original_url)
+        # Replace '&&' with '&'
+        original_url = re.sub(r'&&+', '&', original_url)
+        # Ensure '?' is only if there are params
+        if '?' in original_url and not original_url.split('?', 1)[1]:
+            original_url = original_url.split('?', 1)[0]
+
+        logger.info(f"[convert_to_original_url_enhanced] URL after all rules: {original_url}")
+
+        # Fallback logic: if URL hasn't changed much or still seems like a thumbnail
+        if original_url == thumbnail_url or "thumb" in original_url or "preview" in original_url:
+            logger.debug("[convert_to_original_url_enhanced] Fallback: Attempting to extract base URL or reconstruct.")
+            # Try to get the base part of the URL, removing query string and common thumbnail markers
+            base_match = re.match(r'(https://[^?#]+)', original_url)
+            if base_match:
+                base_url = base_match.group(1)
+                # Further clean common suffixes if any are left
+                base_url = re.sub(r'(_(small|medium|large|thumb|preview))?\.(jpg|jpeg|png|webp|avif)$', '', base_url, flags=re.IGNORECASE)
+                
+                # Prefer .png or .jpeg as high-quality original formats
+                if not base_url.lower().endswith(('.png', '.jpeg', '.jpg')):
+                    base_url += '.jpeg'
+                
+                if base_url != original_url:
+                    logger.debug(f"[convert_to_original_url_enhanced] Fallback: Using base URL: {base_url}")
+                    original_url = base_url
                 else:
-                    print("无法提取基础URL，尝试手动构建...")
-                    # 手动构建原图URL
-                    # 从缩略图URL中提取图片ID
-                    id_match = re.search(r'image_skill/([^~]+)', thumbnail_url)
+                    # If base_url extraction didn't significantly change, try Doubao specific reconstruction
+                    id_match = re.search(r'image_skill/([^~?]+)', thumbnail_url)
                     if id_match:
-                        image_id = id_match.group(1)
-                        # 构建原图URL（不带任何处理参数）
+                        image_id = id_match.group(1).split('.')[0] # Get ID before any format suffix
                         domain_match = re.match(r'(https://[^/]+)', thumbnail_url)
                         if domain_match:
                             domain = domain_match.group(1)
-                            constructed_url = f"{domain}/ocean-cloud-tos/image_skill/{image_id}.jpeg"
-                            print(f"构建的原图URL: {constructed_url}")
-                            return constructed_url
+                            constructed_url = f"{domain}/ocean-cloud-tos/image_skill/{image_id}.png" # Try PNG first
+                            logger.debug(f"[convert_to_original_url_enhanced] Fallback: Constructed Doubao URL (PNG): {constructed_url}")
+                            # Here, one might add a check if .png is valid, then try .jpeg if not.
+                            # For now, we'll assume .png or .jpeg are good defaults.
+                            original_url = constructed_url
+            else:
+                logger.debug("[convert_to_original_url_enhanced] Fallback: Could not extract base URL.")
+
+        logger.info(f"[convert_to_original_url_enhanced] Final converted URL: {original_url}")
+        return original_url
             
-            return original_url
-            
-        except Exception as e:
-            print(f"URL转换失败: {e}")
-            return thumbnail_url
+        # except Exception as e: # This broad except might catch NameError for re if not imported
+        #     logger.error(f"[convert_to_original_url_enhanced] URL conversion failed: {e}")
+        #     return thumbnail_url
 
     def is_likely_generated_image(self, url):
-        """判断URL是否为生成的图片"""
-        if not url or not isinstance(url, str):
+        """判断URL是否为生成的图片 (Improved)."""
+        if not url or not isinstance(url, str) or not url.startswith('http'):
+            logger.debug(f"[is_likely_generated_image] Invalid URL provided: {url}")
             return False
         
-        # 排除明显的非图片URL
+        url_lower = url.lower()
+
+        # More comprehensive exclusion list for UI elements, ads, trackers, etc.
+        # Added 'banner', 'ad', 'sprite', 'captcha', and path-based exclusions.
         exclude_patterns = [
-            'data:image/svg+xml',  # SVG占位符
-            'avatar',              # 头像
-            'icon',                # 图标
-            'logo',                # 标志
-            'placeholder',         # 占位符
-            'loading',             # 加载图片
-            'default',             # 默认图片
-            'thumb_',              # 某些缩略图前缀
-            'profile',             # 个人资料图片
+            'data:image/svg+xml', 'data:image/gif', # Common placeholders or tiny images
+            'avatar', 'icon', 'logo', 'profile', 'button', 'menu', 'banner', 'ad', 'sprite', 'captcha', 'badge', 'flag',
+            'placeholder', 'loading', 'default', 'bg-', '-bg', 'background', 'spinner', 'shimmer', 'skeleton',
+            'static', 'assets', 'ui', 'css', 'js', 'track', 'pixel', 'beacon', 'share', 'social', 'payment', 'card',
+            'thumb_', '_thumb', '.thumb', '_small', '.small', '_ico', '.ico', '_thumbnail', '.thumbnail', # Thumbnail indicators
+            'favicon', 'apple-touch-icon', 'emoji', 'sticker', # Often not generated content
+            '/ads/', '/banners/', '/buttons/', '/icons/', '/logos/', '/avatars/', '/widgets/', '/static/', '/assets/', '/img/ui/',
+            '1x1', 'pixel.gif', 'blank.gif', 'empty.png', # Common tracking pixels or spacers
+            'sprite', 'spritesheet', 'gradient', 'pattern', # CSS related images
+            'logo-white', 'logo-dark', # Variations of logos
+            'example.com', 'via.placeholder.com', # Placeholder services
+            'gravatar.com', # Specific avatar service
         ]
         
-        url_lower = url.lower()
         for pattern in exclude_patterns:
             if pattern in url_lower:
+                logger.debug(f"[is_likely_generated_image] URL excluded by pattern '{pattern}': {url_lower[:70]}...")
                 return False
         
-        # 豆包生成图片的特征（更新后的识别条件）
-        doubao_patterns = [
-            # 新的域名识别 - 关键特征：byteimg.com + image_skill
-            ('byteimg.com', 'image_skill'),  # 需要同时包含这两个
-            ('doubao', 'generated'),
-            ('bytedance', 'ai'),
-            # 原有的模式
-            'flow-imagex-sign.byteimg.com',
-            'ocean-cloud-tos',
-            'tplv-',
-            'web-thumb-watermark',
-            'web-watermark'
+        # Refined Doubao/Bytedance patterns - prioritize more specific ones
+        doubao_specific_patterns = [
+            ('byteimg.com', 'image_skill'),
+            ('sf-cdn.com', 'obj/eden-cn/'), # Another potential CDN for Doubao
+            ('pstatp.com', 'origin/tos-cn-i-'), # CDN used by Bytedance products
+            ('douyinpic.com', 'obj/') # Douyin (related) picture CDN
+        ]
+
+        general_generated_keywords = [
+            'flow-imagex-sign.byteimg.com', # Strong Doubao/Bytedance signal
+            'ocean-cloud-tos',             # Strong Bytedance CDN signal when combined with image paths
+            'tplv-',                       # Bytedance image processing, often on generated or uploaded images
+            # Keywords that might appear in paths or filenames of generated images.
+            # Use cautiously as they can be part of user prompts or UI text.
+            # 'ai_generated', 'aigc', 'diffusion', 'gan', 'neural', 'art_work'
         ]
         
-        # 检查是否包含豆包图片特征
-        for pattern in doubao_patterns:
-            if isinstance(pattern, tuple):
-                # 需要同时包含两个条件
-                if all(p in url for p in pattern):
-                    return True
-            else:
-                # 单个条件
-                if pattern in url:
-                    return True
+        # Check for specific Doubao/Bytedance hosting and path patterns
+        for domain, path_segment in doubao_specific_patterns:
+            if domain in url_lower and path_segment in url_lower:
+                logger.debug(f"[is_likely_generated_image] URL matched Doubao specific pattern ('{domain}', '{path_segment}'): {url_lower[:70]}...")
+                return True
+
+        # Check for general keywords associated with generated content CDNs or processing
+        for pattern in general_generated_keywords:
+            if pattern in url_lower:
+                 # If 'tplv-' is found, it's highly likely a Bytedance image, could be original or processed.
+                 # convert_to_original_url_enhanced handles stripping tplv- parameters.
+                logger.debug(f"[is_likely_generated_image] URL matched general pattern '{pattern}': {url_lower[:70]}...")
+                return True
         
-        # 通用图片URL检查
+        # Final check for image extensions - this is the weakest signal
         image_extensions = ['.jpg', '.jpeg', '.png', '.webp', '.avif']
-        return any(ext in url_lower for ext in image_extensions)
+        has_image_extension = any(url_lower.endswith(ext) or f"{ext}?" in url_lower for ext in image_extensions)
+
+        if has_image_extension:
+            # If it has an image extension but didn't match stronger patterns,
+            # it's less certain. It might be a UI element not caught by exclude_patterns.
+            # Rely on structural indicators (like imagex-type, class, size) in the calling functions.
+            logger.debug(f"[is_likely_generated_image] URL has image extension but no strong generated patterns: {url_lower[:70]}.... Will rely on further checks.")
+            return True # Tentatively true, expect more checks in calling function
+
+        logger.debug(f"[is_likely_generated_image] URL did not match any exclusion or strong inclusion criteria: {url_lower[:70]}...")
+        return False
 
     def enable_network_logging(self):
         """启用网络请求日志记录"""
@@ -884,132 +959,112 @@ class DoubaoImageGenerator:
             options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
             
             self.driver = webdriver.Chrome(options=options)
-            print("✅ 网络日志记录已启用")
+            logger.info("网络日志记录已启用 (通过goog:loggingPrefs性能日志)。")
             
         except Exception as e:
-            print(f"❌ 启用网络日志失败: {e}")
+            logger.error(f"启用网络日志失败: {e}", exc_info=True)
 
     def get_network_requests(self, filter_pattern=None):
-        """获取网络请求记录"""
+        """获取网络请求记录 - Basic implementation, may need refinement for specific needs."""
         try:
+            logger.debug(f"尝试获取性能日志 (filter: {filter_pattern})...")
             logs = self.driver.get_log('performance')
-            requests = []
+            requests_data = []
             
-            for log in logs:
-                message = json.loads(log['message'])
-                if message['message']['method'] == 'Network.responseReceived':
-                    response = message['message']['params']['response']
-                    url = response['url']
+            for log_entry in logs:
+                message = json.loads(log_entry['message'])
+                if message.get('message', {}).get('method') == 'Network.responseReceived':
+                    response = message['message']['params'].get('response', {})
+                    url = response.get('url', '')
+                    mime_type = response.get('mimeType', '')
                     
-                    # 过滤图片请求
                     if filter_pattern:
-                        if filter_pattern in url.lower():
-                            requests.append({
-                                'url': url,
-                                'mimeType': response.get('mimeType', ''),
+                        if filter_pattern.lower() in url.lower():
+                            requests_data.append({
+                                'url': url, 'mimeType': mime_type,
                                 'status': response.get('status', 0),
                                 'headers': response.get('headers', {})
                             })
-                    elif any(img_type in response.get('mimeType', '').lower() for img_type in ['image/', 'png', 'jpg', 'jpeg', 'webp']):
-                        requests.append({
-                            'url': url,
-                            'mimeType': response.get('mimeType', ''),
+                    elif any(img_type in mime_type.lower() for img_type in ['image/png', 'image/jpeg', 'image/webp', 'image/avif', 'image/gif']):
+                        requests_data.append({
+                            'url': url, 'mimeType': mime_type,
                             'status': response.get('status', 0),
                             'headers': response.get('headers', {})
                         })
             
-            return requests
+            logger.debug(f"[get_network_requests] Found {len(requests_data)} requests matching criteria.")
+            return requests_data
             
         except Exception as e:
-            print(f"获取网络请求失败: {e}")
+            logger.error(f"[get_network_requests] Error getting network requests: {e}", exc_info=True)
             return []
 
     def get_current_images_with_network_monitoring(self):
-        """通过网络监控获取图片（增强版：获取原图）"""
+        """
+        Retrieves current images, primarily using the JavaScript-based find_images_with_javascript.
+        The name "network_monitoring" is a misnomer from previous versions if not actively parsing network logs here.
+        """
         try:
-            from selenium.webdriver.common.action_chains import ActionChains
+            # from selenium.webdriver.common.action_chains import ActionChains # Not directly used
+            from selenium.common.exceptions import StaleElementReferenceException
+
+            logger.info("[get_current_images_with_network_monitoring] Starting image retrieval using JS-based finder.")
+            time.sleep(0.5) # Shorter sleep, allowing for quick dynamic updates
+
+            candidate_image_elements = self.find_images_with_javascript()
             
-            # 等待页面完全加载
-            time.sleep(3)
+            if not candidate_image_elements:
+                logger.warning("[get_current_images_with_network_monitoring] No candidate images found by JavaScript method. Consider fallback if necessary.")
+                return [] # No images found
             
-            # 优先使用JavaScript方法查找图片
-            print("=== 使用JavaScript方法查找图片 ===")
-            unique_images = self.find_images_with_javascript()
-            
-            if not unique_images:
-                print("JavaScript方法未找到图片，回退到传统选择器方法")
-                # 回退到传统选择器方法
-                image_selectors = [
-                    "//div[contains(@class, 'image-box-grid-item')]//img[contains(@class, 'image-') and contains(@src, 'http')]",
-                    "//div[@data-testid='mdbox_image']//img[contains(@src, 'http')]",
-                    "//div[contains(@class, 'image-wrapper')]//img[contains(@src, 'http')]"
-                ]
-                
-                all_images = []
-                for selector in image_selectors:
-                    try:
-                        elements = self.driver.find_elements(By.XPATH, selector)
-                        all_images.extend(elements)
-                        print(f"选择器找到 {len(elements)} 张图片")
-                    except Exception as e:
-                        continue
-                
-                # 去重
-                unique_images = []
-                seen_srcs = set()
-                for img in all_images:
-                    try:
-                        src = img.get_attribute('src')
-                        if src and src not in seen_srcs and self.is_likely_generated_image(src):
-                            unique_images.append(img)
-                            seen_srcs.add(src)
-                    except:
-                        continue
-            
-            print(f"找到 {len(unique_images)} 张有效图片")
+            logger.info(f"[get_current_images_with_network_monitoring] Found {len(candidate_image_elements)} candidate image elements via JavaScript.")
             
             valid_image_urls = []
-            actions = ActionChains(self.driver)
-            
-            for i, img in enumerate(unique_images):
+            processed_src_urls = set()
+
+            for i, img_element in enumerate(candidate_image_elements, 1):
+                thumbnail_url_attr = "N/A"
                 try:
-                    print(f"\n=== 处理第 {i+1} 张图片 ===")
-                    
-                    # 获取缩略图URL
-                    thumbnail_url = img.get_attribute('src')
-                    print(f"缩略图URL: {thumbnail_url[:80]}...")
-                    
-                    # 滚动到图片位置
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img)
-                    time.sleep(1)
-                    
-                    # 尝试获取原图URL
-                    original_url = self.get_original_image_url(img, thumbnail_url)
-                    
-                    if original_url and original_url != thumbnail_url:
-                        print(f"✅ 获取到原图URL: {original_url[:80]}...")
-                        valid_image_urls.append(original_url)
-                    else:
-                        print(f"⚠️ 未能获取原图，使用缩略图: {thumbnail_url[:80]}...")
-                        valid_image_urls.append(thumbnail_url)
-                    
-                except Exception as e:
-                    print(f"处理第 {i+1} 张图片时出错: {e}")
-                    # 如果出错，至少保存缩略图
+                    thumbnail_url_attr = img_element.get_attribute('src')
+                    if not thumbnail_url_attr or thumbnail_url_attr in processed_src_urls :
+                        if thumbnail_url_attr in processed_src_urls:
+                             logger.debug(f"[get_current_images_with_network_monitoring] Skipping already processed src: {thumbnail_url_attr[:70]}...")
+                        continue # Skip if no src or already processed
+
+                    logger.info(f"[get_current_images_with_network_monitoring] Processing element {i}/{len(candidate_image_elements)}: {thumbnail_url_attr[:70]}...")
+                    processed_src_urls.add(thumbnail_url_attr)
+
+                    # Scroll to image element to ensure it's interactable for get_original_image_url
                     try:
-                        thumbnail_url = img.get_attribute('src')
-                        valid_image_urls.append(thumbnail_url)
-                    except:
-                        continue
+                        self.driver.execute_script("arguments[0].scrollIntoView({ behavior: 'smooth', block: 'center' });", img_element)
+                        time.sleep(0.3)
+                    except Exception as e_scroll:
+                        logger.warning(f"[get_current_images_with_network_monitoring] Failed to scroll to image {thumbnail_url_attr[:70]}: {e_scroll}")
+                        # Continue anyway, get_original_image_url might still work
+
+                    # get_original_image_url now includes verification
+                    original_url = self.get_original_image_url(img_element, thumbnail_url_attr)
+                    
+                    if original_url and original_url.startswith('http'):
+                        # Ensure verify_image_accessibility was effectively called in get_original_image_url
+                        # or call it explicitly here if get_original_image_url's contract changes.
+                        # Current get_original_image_url should return a verified URL or verified thumbnail.
+                        valid_image_urls.append(original_url)
+                        logger.info(f"[get_current_images_with_network_monitoring] Added URL: {original_url[:70]}")
+                    else:
+                        logger.warning(f"[get_current_images_with_network_monitoring] No valid original or verified thumbnail URL obtained for {thumbnail_url_attr[:70]}")
+                    
+                except StaleElementReferenceException:
+                    logger.warning(f"[get_current_images_with_network_monitoring] Stale element reference for image {i} ({thumbnail_url_attr[:70]}...), skipping.")
+                except Exception as e: # Catch any other error during processing of a single image
+                    logger.error(f"[get_current_images_with_network_monitoring] Error processing image {i} ({thumbnail_url_attr[:70]}...): {e}", exc_info=True)
             
-            print(f"\n最终获取到 {len(valid_image_urls)} 张图片URL")
-            return valid_image_urls
+            final_unique_urls = list(dict.fromkeys(valid_image_urls)) # Deduplicate
+            logger.info(f"[get_current_images_with_network_monitoring] Final list of {len(final_unique_urls)} unique image URLs.")
+            return final_unique_urls
             
-        except Exception as e:
-            print(f"网络监控方法执行失败: {e}")
-            print(f"错误类型: {type(e).__name__}")
-            import traceback
-            print(f"详细错误: {traceback.format_exc()}")
+        except Exception as e: # Catch errors for the whole function
+            logger.error(f"[get_current_images_with_network_monitoring] Major error in function: {e}", exc_info=True)
             return []
 
     def get_download_url_from_browser(self):
@@ -1046,68 +1101,63 @@ class DoubaoImageGenerator:
             return None
             
         except Exception as e:
-            print(f"获取下载URL时出现错误: {e}")
+            logger.error(f"[get_download_url_from_browser] Error getting download URL: {e}", exc_info=True)
             return None
     
     def get_image_real_url(self, img_element):
         """获取图片元素的真实URL"""
         try:
-            # 尝试多种方法获取真实URL
+            logger.debug(f"尝试从元素属性获取真实URL: {img_element.tag_name}")
             methods = [
                 lambda: img_element.get_attribute('data-original'),
                 lambda: img_element.get_attribute('data-src'),
                 lambda: img_element.get_attribute('data-full-url'),
-                lambda: img_element.get_attribute('src'),
+                lambda: img_element.get_attribute('src'), # Last resort
             ]
             
-            for method in methods:
+            for i, method in enumerate(methods):
                 try:
                     url = method()
-                    if url and self.is_valid_image_url(url):
-                        # 尝试转换为原图URL
-                        original_url = self.convert_to_original_url_enhanced(url)
-                        return original_url
-                except:
+                    logger.debug(f"  方法 {i+1} 得到URL: {url[:70] if url else 'None'}...")
+                    if url and self.is_valid_image_url(url): # Basic check
+                        # Conversion and deeper validation happens in get_original_image_url
+                        return self.convert_to_original_url_enhanced(url)
+                except Exception as e_attr:
+                    logger.debug(f"  获取属性时出错 (方法 {i+1}): {e_attr}")
                     continue
             
+            logger.warning(f"未能从元素属性中找到有效的图片URL: {img_element.tag_name}")
             return None
             
         except Exception as e:
-            print(f"获取真实URL时出现错误: {e}")
+            logger.error(f"获取真实URL时出现错误: {e}", exc_info=True)
             return None
     
-    def download_image_via_browser(self, image_url, filename):
+    def download_image_via_browser(self, image_url, base_filename): # Changed 'filename' to 'base_filename'
         """通过浏览器下载图片（支持下载按钮方式）"""
         try:
-            print(f"正在下载图片: {image_url[:50]}...")
+            logger.info(f"尝试通过浏览器下载图片: {image_url[:70]}... as {base_filename}")
             
-            # 如果URL看起来像是通过下载按钮获取的，直接下载
             if 'download' in image_url.lower() or 'original' in image_url.lower():
-                return self.download_image(image_url, filename)
+                return self.download_image(image_url, base_filename) # download_image handles extension
             
-            # 否则，尝试在新标签页中打开图片
             original_window = self.driver.current_window_handle
-            
-            # 在新标签页中打开图片
             self.driver.execute_script(f"window.open('{image_url}', '_blank');")
-            time.sleep(2)
+            time.sleep(2) # Wait for new tab
             
-            # 切换到新标签页
             new_window = [handle for handle in self.driver.window_handles if handle != original_window][0]
             self.driver.switch_to.window(new_window)
             
-            # 获取新标签页的URL（可能是重定向后的真实图片URL）
-            real_url = self.driver.current_url
+            real_url = self.driver.current_url # URL might change/resolve in new tab
+            logger.debug(f"URL in new tab for browser download: {real_url[:70]}...")
             
-            # 关闭新标签页并切换回原窗口
             self.driver.close()
             self.driver.switch_to.window(original_window)
             
-            # 使用真实URL下载图片
-            return self.download_image(real_url, filename)
+            return self.download_image(real_url, base_filename) # download_image handles extension
             
         except Exception as e:
-            print(f"通过浏览器下载图片时出现错误: {e}")
+            logger.error(f"通过浏览器下载图片时出现错误: {e}", exc_info=True)
             return False
     
     def is_valid_image_url(self, url):
@@ -1182,178 +1232,194 @@ class DoubaoImageGenerator:
                 if ('image' in content_type and 
                     content_length and 
                     int(content_length) > 10240):  # 大于10KB
-                    print(f"验证通过: {url[:50]}... (大小: {int(content_length)/1024:.1f}KB)")
+                    logger.info(f"[verify_image_accessibility] Verification passed for {url[:50]}... (Size: {int(content_length)/1024:.1f}KB, Type: {content_type})")
                     return True
+                else: # This else was slightly misaligned in previous version, corrected.
+                    logger.warning(f"[verify_image_accessibility] Verification failed for {url[:50]}... Status: {response.status_code}, Type: {content_type}, Length: {content_length}")
             
             return False
             
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[verify_image_accessibility] Network error verifying URL {url[:50]}...: {e}")
+            return False
         except Exception as e:
-            print(f"验证图片URL时出现错误: {e}")
+            logger.error(f"[verify_image_accessibility] Error verifying image URL {url[:50]}...: {e}", exc_info=True)
             return False
     
     def send_image_request_via_browser(self, prompt):
         """通过浏览器发送图片生成请求"""
         try:
-            print(f"🚀 开始生成图片: {prompt}")
-            print(f"📍 当前页面URL: {self.driver.current_url}")
+            logger.info(f"🚀 开始生成图片: {prompt[:50]}...")
+            logger.debug(f"📍 当前页面URL: {self.driver.current_url}")
             
-            # 查找输入框
             input_selectors = [
                 "//textarea[@placeholder*='输入' or @placeholder*='消息' or @placeholder*='问题']",
                 "//input[@placeholder*='输入' or @placeholder*='消息' or @placeholder*='问题']",
                 "//div[@contenteditable='true']",
-                "textarea",
-                "input[type='text']"
+                "textarea[aria-label*='message']",
+                "input[type='text'][placeholder*='Send']"
             ]
             
-            print(f"🔍 开始查找输入框，共有 {len(input_selectors)} 个选择器")
+            logger.debug(f"🔍 开始查找输入框，共有 {len(input_selectors)} 个选择器")
             input_element = None
             for i, selector in enumerate(input_selectors):
                 try:
-                    print(f"  尝试选择器 {i+1}: {selector}")
-                    if selector.startswith('//'):
-                        input_element = WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, selector))
-                        )
-                    else:
-                        input_element = WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                        )
-                    print(f"  ✅ 成功找到输入框: {selector}")
+                    logger.debug(f"  尝试选择器 {i+1}: {selector}")
+                    element_type = "XPATH" if selector.startswith("//") else "CSS_SELECTOR"
+                    input_element = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((getattr(By, element_type), selector))
+                    )
+                    logger.info(f"  ✅ 成功找到输入框: {selector}")
                     break
-                except Exception as e:
-                    print(f"  ❌ 选择器失败: {str(e)[:100]}")
+                except Exception:
+                    logger.debug(f"  ❌ 选择器失败: {selector}")
                     continue
             
             if not input_element:
-                print("❌ 所有输入框选择器都失败了")
-                # 尝试打印页面上所有可能的输入元素
-                all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
-                all_textareas = self.driver.find_elements(By.TAG_NAME, "textarea")
-                all_contenteditable = self.driver.find_elements(By.XPATH, "//div[@contenteditable='true']")
-                
-                print(f"📊 页面统计: input元素{len(all_inputs)}个, textarea元素{len(all_textareas)}个, contenteditable元素{len(all_contenteditable)}个")
-                
-                for i, inp in enumerate(all_inputs[:3]):  # 只显示前3个
-                    try:
-                        placeholder = inp.get_attribute('placeholder') or '无'
-                        input_type = inp.get_attribute('type') or '无'
-                        print(f"  input[{i}]: type={input_type}, placeholder={placeholder}")
-                    except:
-                        pass
-                        
-                for i, ta in enumerate(all_textareas[:3]):  # 只显示前3个
-                    try:
-                        placeholder = ta.get_attribute('placeholder') or '无'
-                        print(f"  textarea[{i}]: placeholder={placeholder}")
-                    except:
-                        pass
-                
+                logger.error("❌ 所有输入框选择器都失败了。无法发送提示词。")
+                page_sample = self.driver.page_source[:500] # Log small part of page for context
+                logger.debug(f"Page source sample for debugging input failure: {page_sample}")
                 raise Exception("找不到输入框")
             
-            # 清空输入框并输入提示词
-            print(f"📝 清空输入框并输入提示词: {prompt[:50]}...")
+            logger.info(f"📝 清空输入框并输入提示词: {prompt[:50]}...")
             input_element.clear()
-            time.sleep(0.5)  # 等待清空完成
+            time.sleep(0.2)
             input_element.send_keys(prompt)
-            print(f"✅ 提示词输入完成")
+            logger.debug("✅ 提示词输入完成")
             
-            # 发送消息
-            print(f"📤 尝试发送消息")
+            logger.info("📤 尝试发送消息...")
             try:
                 input_element.send_keys(Keys.RETURN)
-                print(f"✅ 通过回车键发送成功")
-            except Exception as e:
-                print(f"❌ 回车键发送失败: {e}")
-                print(f"🔍 尝试查找发送按钮")
+                logger.info("✅ 通过回车键发送成功")
+            except Exception as e_return:
+                logger.warning(f"❌ 回车键发送失败: {e_return}. 尝试查找发送按钮...")
                 try:
-                    send_button = self.driver.find_element(By.XPATH, "//button[contains(text(), '发送') or contains(text(), '提交')]")
+                    send_button_xpath = "//button[contains(text(), '发送') or contains(text(), '提交') or contains(@aria-label, 'Send') or contains(@aria-label, 'Submit') or descendant::*[local-name()='svg' and (@aria-label='send' or @aria-label='发送')]]"
+                    send_button = WebDriverWait(self.driver, 2).until(
+                        EC.element_to_be_clickable((By.XPATH, send_button_xpath))
+                    )
                     send_button.click()
-                    print(f"✅ 通过发送按钮发送成功")
-                except Exception as e2:
-                    print(f"❌ 发送按钮也失败: {e2}")
-                    # 尝试查找所有按钮
-                    all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
-                    print(f"📊 页面上共有 {len(all_buttons)} 个按钮")
-                    for i, btn in enumerate(all_buttons[:5]):  # 只显示前5个
-                        try:
-                            btn_text = btn.text or btn.get_attribute('aria-label') or '无文本'
-                            print(f"  button[{i}]: {btn_text[:30]}")
-                        except:
-                            pass
-                    raise Exception(f"无法发送消息: {e2}")
+                    logger.info("✅ 通过发送按钮发送成功")
+                except Exception as e_button:
+                    logger.error(f"❌ 发送按钮也失败: {e_button}", exc_info=True)
+                    raise Exception(f"无法发送消息: {e_return} / {e_button}")
             
-            print(f"⏳ 消息已发送，开始等待图片生成...")
+            logger.info("⏳ 消息已发送，开始等待图片生成...")
             
-            # 等待图片真正生成完成
-            result = self.wait_for_image_generation()
+            result = self.wait_for_image_generation() # This now returns list of downloaded filenames
             
-            # 检查返回结果的类型
             if isinstance(result, list) and result:
-                # 如果返回的是文件名列表（新的下载逻辑），直接返回
-                if isinstance(result[0], str) and not result[0].startswith('http'):
-                    print(f"🎯 图片生成完成，共下载 {len(result)} 张图片")
-                    for i, filename in enumerate(result):
-                        print(f"  图片[{i+1}]: {filename}")
-                    return result  # 直接返回，不再重复下载
-                # 如果返回的是URL列表（旧的逻辑），继续下载
-                else:
-                    print(f"🎯 图片生成完成，共获取到 {len(result)} 个图片URL")
-                    # 这里可以添加下载逻辑
-                    return result
+                logger.info(f"🎯 图片生成并下载完成，共 {len(result)} 张图片。")
+                return result
             else:
-                print("❌ 未获取到有效的图片结果")
+                logger.warning("❌ 未获取到有效的图片结果或下载失败。")
                 return []
             
         except Exception as e:
-            print(f"❌ 通过浏览器生成图片时出现错误: {e}")
-            import traceback
-            print(f"📋 详细错误信息:\n{traceback.format_exc()}")
+            logger.error(f"❌ 通过浏览器生成图片时出现错误: {e}", exc_info=True)
             return []
     
-    def download_image(self, image_url, filename):
-        """下载图片"""
+    def download_image(self, image_url, base_filename):
+        """
+        Downloads an image from image_url to base_filename with an extension determined by Content-Type.
+        Performs verification (size, integrity, dimensions) and returns the full filename if successful, else None.
+        """
         try:
-            print(f"正在下载图片: {image_url[:50]}...")
+            logger.info(f"Attempting to download image: {image_url[:70]}... for base filename: {base_filename}")
             
-            # 使用浏览器的cookies来下载图片
             cookies = self.driver.get_cookies()
             cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://www.doubao.com/',
-                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+                'Referer': 'https://www.doubao.com/', # Important for some CDNs
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8', # Prioritize modern formats
+                'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7'
             }
             
-            response = requests.get(image_url, headers=headers, cookies=cookie_dict, timeout=30)
+            response = requests.get(image_url, headers=headers, cookies=cookie_dict, timeout=30, stream=True)
             
             if response.status_code == 200:
-                # 检查响应内容是否为有效图片
-                content_type = response.headers.get('content-type', '')
-                content_length = len(response.content)
+                content_type = response.headers.get('content-type', '').lower()
+                extension_map = {
+                    'image/jpeg': '.jpg', 'image/jpg': '.jpg',
+                    'image/png': '.png',
+                    'image/webp': '.webp',
+                    'image/avif': '.avif',
+                    'image/gif': '.gif'
+                }
+                extension = '.jpg' # Default extension
+                for mime, ext in extension_map.items():
+                    if mime == content_type:
+                        extension = ext
+                        break
+                logger.info(f"Determined extension '{extension}' for content-type '{content_type}' from URL: {image_url[:70]}")
+                actual_filename_with_ext = base_filename + extension
+
+                with open(actual_filename_with_ext, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192): # Stream content
+                        f.write(chunk)
                 
-                print(f"响应状态: {response.status_code}")
-                print(f"内容类型: {content_type}")
-                print(f"文件大小: {content_length} 字节")
-                
-                # 验证是否为有效图片（大小应该大于10KB）
-                if content_length > 10240 and 'image' in content_type:
-                    with open(filename, 'wb') as f:
-                        f.write(response.content)
-                    print(f"✅ 图片已保存为: {filename} (大小: {content_length/1024:.1f}KB)")
-                    return True
-                else:
-                    print(f"❌ 下载的文件不是有效图片 (大小: {content_length} 字节, 类型: {content_type})")
-                    return False
+                # --- Verification ---
+                min_file_size = 10240  # 10KB
+                min_dimension = 300   # pixels, e.g., 300x300
+
+                if not os.path.exists(actual_filename_with_ext):
+                    logger.error(f"File {actual_filename_with_ext} not found after supposed write for URL: {image_url[:70]}.")
+                    return None
+
+                file_size = os.path.getsize(actual_filename_with_ext)
+                if file_size < min_file_size:
+                    logger.warning(f"Downloaded file {actual_filename_with_ext} is too small ({file_size} bytes). Might be a thumbnail or error page. Deleting.")
+                    os.remove(actual_filename_with_ext)
+                    return None
+
+                try:
+                    img = Image.open(actual_filename_with_ext)
+                    img.verify() # Verifies integrity. Raises exception on error.
+                    # Reopen after verify for formats that need it (e.g. JPEG)
+                    img = Image.open(actual_filename_with_ext)
+                    width, height = img.size
+                    img.close() # Close image after getting dimensions
+
+                    if width < min_dimension or height < min_dimension:
+                        logger.warning(f"Image {actual_filename_with_ext} dimensions ({width}x{height}) are too small. Might be a thumbnail. Deleting.")
+                        os.remove(actual_filename_with_ext)
+                        return None
+
+                    logger.info(f"✅ Successfully downloaded and verified {actual_filename_with_ext} (Size: {file_size} bytes, Dimensions: {width}x{height})")
+                    return actual_filename_with_ext
+
+                except FileNotFoundError: # Should be caught by os.path.exists above, but as a safeguard.
+                     logger.error(f"File {actual_filename_with_ext} vanished before Pillow verification for URL: {image_url[:70]}.")
+                     return None
+                except Image.DecompressionBombError:
+                    logger.warning(f"Image {actual_filename_with_ext} triggered DecompressionBombError. Likely too large or malformed. Deleting.")
+                    if os.path.exists(actual_filename_with_ext): os.remove(actual_filename_with_ext)
+                    return None
+                except (IOError, SyntaxError, Image.UnidentifiedImageError) as e_pil: # Catch PIL specific errors
+                    logger.warning(f"Image verification failed for {actual_filename_with_ext} using Pillow: {e_pil}. File might be corrupt or not a valid image. Deleting.")
+                    if os.path.exists(actual_filename_with_ext): os.remove(actual_filename_with_ext)
+                    return None
+                except Exception as e_verify: # Other errors during verification
+                    logger.error(f"Unexpected error during verification of {actual_filename_with_ext}: {e_verify}. Deleting.", exc_info=True)
+                    if os.path.exists(actual_filename_with_ext): os.remove(actual_filename_with_ext)
+                    return None
             else:
-                print(f"❌ 下载图片失败，状态码: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"❌ 下载图片时出现错误: {e}")
-            return False
+                logger.warning(f"Failed to download {image_url[:70]}. HTTP Status: {response.status_code}")
+                return None
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout while trying to download {image_url[:70]}.")
+            return None
+        except requests.exceptions.RequestException as e_req:
+            logger.error(f"Network error downloading {image_url[:70]}: {e_req}")
+            return None
+        except IOError as e_io: # e.g. disk full, permissions
+            logger.error(f"File system error saving image to {base_filename} + ext: {e_io}", exc_info=True)
+            return None
+        except Exception as e_main: # Catch-all for other unexpected errors
+            logger.error(f"An unexpected error occurred in download_image for {image_url[:70]}: {e_main}", exc_info=True)
+            return None
 
     def is_valid_image_content(self, content):
         """通过文件头验证图片格式"""
@@ -1372,16 +1438,15 @@ class DoubaoImageGenerator:
         
         for signature, format_name in image_signatures.items():
             if content.startswith(signature):
-                print(f"✅ 检测到有效的{format_name}格式图片")
+            logger.debug(f"Detected valid {format_name} format for image content.")
                 return True
             
-            # 特殊处理WEBP
-            if signature == b'RIFF' and len(content) >= 12:
+            if signature == b'RIFF' and len(content) >= 12: # WEBP specific check
                 if content[8:12] == b'WEBP':
-                    print(f"✅ 检测到有效的WEBP格式图片")
+                    logger.debug("Detected valid WEBP format for image content.")
                     return True
         
-        print(f"❌ 未识别的图片格式，文件头: {content[:16].hex()}")
+        logger.warning(f"Unrecognized image format. File header (first 16 bytes): {content[:16].hex()}")
         return False
 
 
@@ -1616,34 +1681,45 @@ class DoubaoImageGenerator:
                 if isinstance(image_urls[0], str) and not image_urls[0].startswith('http'):
                     # 如果返回的是文件名列表，说明已经下载完成，不需要重复下载
                     downloaded_files = image_urls
-                    print(f"✅ 图片已下载完成，共 {len(downloaded_files)} 张图片")
-                else:
-                    # 如果返回的是URL列表，需要下载
-                    downloaded_files = []
-                    for j, url in enumerate(image_urls):
-                        filename = f"generated_image_{i+1}_{j+1}.jpg"
-                        if self.download_image(url, filename):
-                            downloaded_files.append(filename)
-                    print(f"✅ 生成成功，保存了 {len(downloaded_files)} 张图片")
+                    logger.info(f"Image generation returned {len(image_filenames)} downloaded files directly.")
+                    downloaded_files.extend(image_filenames) # Assuming image_filenames is a list of actual filenames
+                    final_image_urls.extend(image_filenames) # Storing filenames if URLs aren't separately available
                 
+                elif isinstance(image_filenames, list) and all(isinstance(item, str) and item.startswith('http') for item in image_filenames):
+                    # If it's a list of URLs, then download them
+                    logger.info(f"Image generation returned {len(image_filenames)} URLs. Attempting downloads.")
+                    temp_download_counter = 0
+                    for j, url in enumerate(image_filenames):
+                        prompt_prefix = re.sub(r'[^\w\s-]', '', prompt[:20]).replace(' ', '_')
+                        base_filename = f"generated_{prompt_prefix}_{i+1}_{temp_download_counter}"
+
+                        actual_file = self.download_image(url, base_filename)
+                        if actual_file:
+                            downloaded_files.append(actual_file)
+                        final_image_urls.append(url) # Store original URL attempted
+                        temp_download_counter += 1
+                else:
+                    logger.warning(f"Received unexpected result from send_image_request_via_browser: {type(image_filenames)}. Expected list of filenames or URLs.")
+
+            if downloaded_files:
+                logger.info(f"Successfully processed prompt '{prompt[:50]}...', {len(downloaded_files)} images downloaded.")
                 results.append({
                     'prompt': prompt,
                     'success': True,
-                    'image_urls': image_urls,
+                    'image_urls': final_image_urls,
                     'downloaded_files': downloaded_files
                 })
             else:
+                logger.error(f"No images successfully downloaded for prompt: '{prompt[:50]}...'")
                 results.append({
                     'prompt': prompt,
                     'success': False,
-                    'image_urls': [],
+                    'image_urls': final_image_urls, # Still record URLs if any were processed
                     'downloaded_files': []
                 })
-                print(f"❌ 生成失败")
             
-            # 等待一段时间再处理下一个
             if i < len(prompts) - 1:
-                print("等待3秒...")
+                logger.info("Waiting 3 seconds before next prompt...")
                 time.sleep(3)
         
         return results
@@ -1676,12 +1752,13 @@ if __name__ == "__main__":
             with open('image_generation_results.json', 'w', encoding='utf-8') as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
             
-            print("\n所有测试完成！结果已保存到 image_generation_results.json")
+            logger.info("\n所有测试完成！结果已保存到 image_generation_results.json")
         else:
-            print("登录失败，无法继续")
+            logger.error("登录失败，无法继续图片生成测试。")
             
     except Exception as e:
-        print(f"程序执行出现错误: {e}")
+        logger.critical(f"程序执行出现严重错误: {e}", exc_info=True)
     
     finally:
+        logger.info("关闭浏览器会话...")
         generator.close()
